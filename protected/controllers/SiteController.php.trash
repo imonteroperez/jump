@@ -1,0 +1,275 @@
+<?php
+
+class SiteController extends Controller
+{
+	public $access_token = '';
+	public $welcome = "no";
+
+	/**
+	 * Declares class-based actions.
+	 */
+	public function actions()
+	{
+		return array(
+			// captcha action renders the CAPTCHA image displayed on the contact page
+			'captcha'=>array(
+				'class'=>'CCaptchaAction',
+				'backColor'=>0xFFFFFF,
+			),
+			// page action renders "static" pages stored under 'protected/views/site/pages'
+			// They can be accessed via: index.php?r=site/page&view=FileName
+			'page'=>array(
+				'class'=>'CViewAction',
+			),
+		);
+	}
+
+	/**
+	 * This is the default 'index' action that is invoked
+	 * when an action is not explicitly requested by users.
+	 */
+	public function actionIndex()
+	{
+		if(isset($_GET["handshake"]))
+			$this->actionLogin();
+		else
+			$this->render('index');
+	}
+
+	/**
+	 * This is the action to handle external exceptions.
+	 */
+	public function actionError()
+	{
+		if($error=Yii::app()->errorHandler->error)
+		{
+			if(Yii::app()->request->isAjaxRequest)
+				echo $error['message'];
+			else
+				$this->render('error', $error);
+		}
+	}
+
+	/**
+	 * Displays the contact page
+	 */
+	public function actionContact()
+	{
+		$model=new ContactForm;
+		if(isset($_POST['ContactForm']))
+		{
+			$model->attributes=$_POST['ContactForm'];
+			if($model->validate())
+			{
+				$name='=?UTF-8?B?'.base64_encode($model->name).'?=';
+				$subject='=?UTF-8?B?'.base64_encode($model->subject).'?=';
+				$headers="From: $name <{$model->email}>\r\n".
+					"Reply-To: {$model->email}\r\n".
+					"MIME-Version: 1.0\r\n".
+					"Content-type: text/plain; charset=UTF-8";
+
+				mail(Yii::app()->params['adminEmail'],$subject,$model->body,$headers);
+				Yii::app()->user->setFlash('contact','Thank you for contacting us. We will respond to you as soon as possible.');
+				$this->refresh();
+			}
+		}
+		$this->render('contact',array('model'=>$model));
+	}
+
+	/**
+	 * Performs a login using the login provider (Facebook)
+	 */
+	public function actionLogin()
+	{
+		$loginUrl = Yii::app()->facebook->getLoginUrl();
+	        $newLoginUrl = str_replace("&state=","?facebook-login=1&state=",$loginUrl);
+
+		if(isset($_GET['facebook-login'])){
+
+			$user_id = Yii::app()->facebook->getUser();
+		        $fb_user = Yii::app()->facebook->getInfoById($user_id);
+			if(isset($_SESSION["fb_".Yii::app()->facebook->appId."_access_token"])){
+			        $this->access_token = $_SESSION["fb_".Yii::app()->facebook->appId."_access_token"];
+				$_SESSION["access_token"] = $this->access_token;
+			}
+			else{
+				if(isset($_SESSION["access_token"])){
+					$this->access_token = $_SESSION["access_token"];
+				}else{
+					if(!isset($_GET["handshake"])){
+						session_destroy();
+						Yii::app()->facebook->destroySession();
+						$this->redirect(Yii::app()->homeUrl."site/login?handshake=1");
+						exit;
+					}else{
+						$this->actionLogin();
+						exit;
+					}
+				}
+			}
+			$user = User::model()->findByPk($user_id);
+			if(is_null($user)){
+			    $user = new User();
+			    $user->id = $fb_user["id"];
+			    $user->first_name = $fb_user["first_name"];
+			    $user->last_name = $fb_user["last_name"];
+			    $external_site = ExternalSite::model()->find('url=:url', array(':url'=>$fb_user["link"]));
+			    if(is_null($external_site)){
+				$external_site = new ExternalSite();
+				$external_site->name = $fb_user["name"]." site on Facebook";
+				$external_site->url = $fb_user["link"];
+				$source = SourceType::model()->find('name=:name', array(':name'=>"Facebook"));
+ 				$external_site->source = $source->id;
+				$external_site->save();
+			    }
+			    $user->external_site_id = $external_site->id;
+			    $user->external_site = $external_site;
+			    $user->save();
+
+			    $friends_ = Yii::app()->facebook->api('/me/friends?access_token='.$this->access_token);
+			    $friends = $friends_["data"];
+			    for ($i=0;$i<count($friends);$i++){
+				$user_ = User::model()->findByPk($friends[$i]["id"]);
+				if(!is_null($user_)){
+					$criteria=new CDbCriteria;
+					$criteria->condition='follower_id=:follower_id AND following_id=:following_id';
+					$criteria->params=array(':follower_id'=>$user->id,':following_id'=>$friends[$i]["id"]);
+					$userFriend=Friends::model()->find($criteria);
+					if(is_null($userFriend)){
+						$userFriend = new Friends();
+						$userFriend->follower_id = $user->id;
+						$userFriend->following_id = $friends[$i]["id"];
+						$userFriend->suggestion = 1;
+						$userFriend->save();
+						$user->friends = $userFriend;
+					}
+				}
+			    }
+
+
+			    $likes_ = Yii::app()->facebook->api('/me/likes?access_token='.$this->access_token);
+			    $likes = $likes_["data"];
+
+			    for ($i=0;$i<count($likes);$i++) {
+				$category = Category::model()->find('name=:name', array(':name'=>$likes[$i]["category"]));
+					if(!is_null($category)){
+						$preferenceCategory = PreferencesCategories::model()->findByAttributes(array('user_id'=>$user->id,'category_id'=>$category->id));
+						if(is_null($preferenceCategory)){
+							$preferenceCategory = new PreferencesCategories();
+							$preferenceCategory->user_id = $user->id;
+							$preferenceCategory->user= $user;
+							$preferenceCategory->category_id = $category->id;
+							$preferenceCategory->category = $category;
+							$preferenceCategory->count = 1;
+						}else{
+							$preferenceCategory->count++;
+						}
+						$preferenceCategory->save();
+					}
+			    }
+
+
+			    $this->welcome = "yes";
+			}else{
+			    // Welcome again
+			    if($user->first_name != $fb_user["first_name"])
+				$user->first_name = $fb_user["first_name"];
+			    if($user->last_name != $fb_user["last_name"])
+				$user->last_name = $fb_user["last_name"];
+
+
+			    $friends_ = Yii::app()->facebook->api('/me/friends?access_token='.$this->access_token);
+			    $friends = $friends_["data"];
+			    for ($i=0;$i<count($friends);$i++){
+				$user_ = User::model()->findByPk($friends[$i]["id"]);
+				if(!is_null($user_)){
+					$criteria=new CDbCriteria;
+					$criteria->condition='follower_id=:follower_id AND following_id=:following_id';
+					$criteria->params=array(':follower_id'=>$user->id,':following_id'=>$friends[$i]["id"]);
+					$userFriend=Friends::model()->find($criteria);
+					if(is_null($userFriend)){
+						$userFriend = new Friends();
+						$userFriend->follower_id = $user->id;
+						$userFriend->following_id = $friends[$i]["id"];
+						$userFriend->suggestion = 1;
+						$user->friends = $userFriend;
+						$userFriend->save();
+					}
+				}
+			    }
+
+			    $likes_ = Yii::app()->facebook->api('/me/likes?access_token='.$this->access_token);
+			    $likes = $likes_["data"];
+
+			    for ($i=0;$i<count($likes);$i++) {
+				$category = Category::model()->find('name=:name', array(':name'=>$likes[$i]["category"]));
+				if(!is_null($category)){
+					$preferenceCategory = PreferencesCategories::model()->findByAttributes(array('user_id'=>$user->id,'category_id'=>$category->id));
+					if(is_null($preferenceCategory)){
+						$preferenceCategory = new PreferencesCategories();
+						$preferenceCategory->user_id = $user->id;
+						$preferenceCategory->user= $user;
+						$preferenceCategory->category_id = $category->id;
+						$preferenceCategory->category = $category;
+						$preferenceCategory->count = 1;
+					}else{
+						$preferenceCategory->count++;
+					}
+					$preferenceCategory->save();
+				}
+			    }
+
+
+			    $name_pinterest = $user->first_name." ".$user->last_name." site on Pinterest";
+                $external_site_pinterest = ExternalSite::model()->find('name=:name', array(':name'=>$name_pinterest));
+			    if(!is_null($external_site_pinterest)){
+				$external_info = ExternalInfo::model()->findByPk(1);
+				$username_ = substr($external_site_pinterest->url,strpos($external_site_pinterest->url,".com/"),strlen($external_site_pinterest->url));
+	                        $username = substr($username_,4,strlen($username_));
+				$_SESSION["jump_user_pinterest_api"] = $external_info->url.$username;
+				$_SESSION["jump_user_pinterest"] = $external_site_pinterest->url;
+			    }
+
+			}
+
+			$_SESSION["welcome"] = $this->welcome;
+			if($_SESSION["welcome"] == "yes"){
+				//$this->redirect(Yii::app()->homeUrl."?r=user/update&id=".$user->id);
+				$this->render('index');
+			}else{
+				$this->render('index');
+			}
+			exit;
+		}
+
+	        if(isset($_GET['facebook-logout'])){
+		        session_destroy();
+			$this->welcome = "no";
+			$this->access_token = '';
+			Yii::app()->facebook->destroySession();
+			$this->redirect(Yii::app()->homeUrl);
+		        exit;
+		}
+
+		$this->redirect($newLoginUrl);
+	}
+
+	/**
+	 * Logs out the current user and redirect to homepage.
+	 */
+	public function actionLogout()
+	{
+		Yii::app()->user->logout();
+		$this->redirect(Yii::app()->homeUrl);
+	}
+
+	protected function afterRender($view, &$output)
+	{
+	  	parent::afterRender($view,$output);
+		//Yii::app()->facebook->addJsCallback($js); // use this if you are registering any $js code you want to run asyc
+		Yii::app()->facebook->initJs($output); // this initializes the Facebook JS SDK on all pages
+		Yii::app()->facebook->renderOGMetaTags(); // this renders the OG tags
+		return true;
+	}
+
+}
